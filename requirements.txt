@@ -1,0 +1,17 @@
+# Core
+python-dotenv>=1.0.0
+spotipy>=2.23.0
+
+# CLI
+rich>=13.0.0
+
+# Future: Telegram
+# python-telegram-bot>=20.0
+
+# Future: FastAPI (for webhooks)
+# fastapi>=0.109.0
+# uvicorn>=0.27.0
+
+# Optional: LLM providers
+# groq>=0.4.0
+# google-generativeai>=0.3.0
