@@ -120,7 +120,32 @@ class Agent:
 
         # If LLM suggests an action, execute it
         if action:
-            if action["action"] == "play":
+            if action["action"] == "info":
+                # Just return the response, no playback action
+                return AgentResponse(message=response_text, action_taken="info")
+
+            elif action["action"] == "stats":
+                # Return stats
+                stats = self.memory.get_stats()
+                insights = self.memory.export_insights()
+
+                stats_msg = f"📊 *Your Listening Stats*\n\n"
+                stats_msg += f"🎵 Total plays: {stats['total_entries']}\n"
+                stats_msg += f"🎼 Unique tracks: {stats['unique_tracks']}\n"
+
+                if stats['moods']:
+                    top_moods = sorted(stats['moods'].items(), key=lambda x: -x[1])[:3]
+                    stats_msg += f"\n🎭 Top moods: {', '.join(f'{m}({c})' for m, c in top_moods)}"
+
+                if insights.get('favorite_artists'):
+                    stats_msg += f"\n❤️ Favorite artists: {', '.join(insights['favorite_artists'][:3])}"
+
+                if insights.get('suggested_mood'):
+                    stats_msg += f"\n\n💡 Suggested mood for now: {insights['suggested_mood']}"
+
+                return AgentResponse(message=stats_msg, action_taken="stats")
+
+            elif action["action"] == "play":
                 self.client.resume()
                 return AgentResponse(message=response_text, action_taken="play")
 

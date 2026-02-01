@@ -1,0 +1,27 @@
+# Systemd service file for Music AI Agent
+#
+# Installation:
+# 1. Edit this file and update paths
+# 2. sudo cp musicbot.service /etc/systemd/system/
+# 3. sudo systemctl daemon-reload
+# 4. sudo systemctl enable musicbot
+# 5. sudo systemctl start musicbot
+#
+# Check status: sudo systemctl status musicbot
+# View logs: journalctl -u musicbot -f
+
+[Unit]
+Description=Music AI Agent Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/Spotify_AI_Agent
+Environment=PATH=/path/to/your/venv/bin
+ExecStart=/path/to/your/venv/bin/python run_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

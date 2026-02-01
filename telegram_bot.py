@@ -326,7 +326,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if response.tracks_played:
         user_sessions[user_id]["last_tracks"] = response.tracks_played
 
-    # Build response message
+    # Different response formats based on action type
+    action = response.action_taken
+
+    # Info/Stats responses - no playback controls needed
+    if action in ["info", "stats", "chat"]:
+        emoji = "📊" if action == "stats" else "💬"
+        await update.message.reply_text(
+            f"{emoji} {response.message}",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Build response message for music actions
     if response.success:
         msg = f"🎵 {response.message}"
 
