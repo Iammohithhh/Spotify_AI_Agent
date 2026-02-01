@@ -1,14 +1,14 @@
 """
 Agent Orchestrator - The core brain of the system.
-Coordinates intent parsing, memory, and Spotify actions.
+Coordinates intent parsing, memory, and music platform actions.
+Works with both Spotify and YouTube Music.
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 
 from agent.intent_parser import Intent, IntentParser, ContentType, ControlAction, Mood
 from agent.memory import Memory
-from tools.spotify import SpotifyClient, Track, AudioFeatures
+from tools.base import MusicClient, Track, Platform
 from config import Config
 
 
@@ -19,22 +19,29 @@ class AgentResponse:
     tracks_played: list[Track] | None = None
     action_taken: str | None = None
     success: bool = True
+    open_url: str | None = None  # For browser-based playback
 
 
 class Agent:
     """
     The main agent that orchestrates all components.
     This is the single entry point for user interactions.
+    Works with any MusicClient implementation.
     """
 
-    def __init__(self, config: Config, spotify: SpotifyClient):
+    def __init__(self, config: Config, music_client: MusicClient):
         self.config = config
-        self.spotify = spotify
+        self.client = music_client
         self.parser = IntentParser()
         self.memory = Memory(config.data_dir / "memory.json")
 
-        # Cache for audio features to avoid repeated API calls
-        self._features_cache: dict[str, AudioFeatures] = {}
+        # Cache for audio features (Spotify only)
+        self._features_cache: dict[str, dict] = {}
+
+    @property
+    def platform_name(self) -> str:
+        """Get human-readable platform name."""
+        return "YouTube Music" if self.client.platform == Platform.YOUTUBE_MUSIC else "Spotify"
 
     def run(self, user_input: str) -> AgentResponse:
         """
@@ -61,61 +68,43 @@ class Agent:
     def _handle_control(self, intent: Intent) -> AgentResponse:
         """Handle playback control commands."""
         action = intent.control_action
+        platform = self.platform_name
 
         if action == ControlAction.PAUSE:
-            success = self.spotify.pause()
-            return AgentResponse(
-                message="Paused." if success else "Couldn't pause. Is Spotify open?",
-                action_taken="pause",
-                success=success,
-            )
+            success = self.client.pause()
+            msg = "Paused." if success else f"Couldn't pause. Is {platform} open?"
+            return AgentResponse(message=msg, action_taken="pause", success=success)
 
         elif action == ControlAction.RESUME:
-            success = self.spotify.resume()
-            return AgentResponse(
-                message="Resuming." if success else "Couldn't resume. Is Spotify open?",
-                action_taken="resume",
-                success=success,
-            )
+            success = self.client.resume()
+            msg = "Resuming." if success else f"Couldn't resume. Is {platform} open?"
+            return AgentResponse(message=msg, action_taken="resume", success=success)
 
         elif action == ControlAction.NEXT:
-            success = self.spotify.next_track()
-            # Record skip in memory if we know what was playing
-            if success:
-                state = self.spotify.get_playback_state()
-                # Note: The skip already happened, so current track is the NEW track
-                # We'd need to track previous track separately for accurate skip recording
-            return AgentResponse(
-                message="Skipped." if success else "Couldn't skip.",
-                action_taken="next",
-                success=success,
-            )
+            success = self.client.next_track()
+            msg = "Skipped." if success else "No next track in queue."
+            return AgentResponse(message=msg, action_taken="next", success=success)
 
         elif action == ControlAction.PREVIOUS:
-            success = self.spotify.previous_track()
-            return AgentResponse(
-                message="Going back." if success else "Couldn't go back.",
-                action_taken="previous",
-                success=success,
-            )
+            success = self.client.previous_track()
+            msg = "Going back." if success else "No previous track."
+            return AgentResponse(message=msg, action_taken="previous", success=success)
 
         elif action == ControlAction.SHUFFLE:
-            # Toggle shuffle
-            state = self.spotify.get_playback_state()
-            if state:
-                new_state = not state.shuffle
-                success = self.spotify.set_shuffle(new_state)
-                msg = f"Shuffle {'on' if new_state else 'off'}."
+            success = self.client.set_shuffle(True)
+            if success:
+                return AgentResponse(message="Shuffle on.", action_taken="shuffle", success=True)
             else:
-                success = self.spotify.set_shuffle(True)
-                msg = "Shuffle on."
-            return AgentResponse(message=msg if success else "Couldn't change shuffle.", success=success)
+                return AgentResponse(
+                    message=f"Shuffle not supported on {platform}.",
+                    success=False,
+                )
 
         return AgentResponse(message="Unknown control command.", success=False)
 
     def _handle_query(self, intent: Intent) -> AgentResponse:
         """Handle queries about current playback."""
-        state = self.spotify.get_playback_state()
+        state = self.client.get_playback_state()
 
         if not state or not state.track:
             return AgentResponse(
@@ -134,7 +123,7 @@ class Agent:
 
     def _handle_podcast(self, intent: Intent) -> AgentResponse:
         """Handle podcast-related requests."""
-        episode = self.spotify.get_current_episode()
+        episode = self.client.get_current_episode()
 
         if episode:
             progress_pct = int((episode["progress_ms"] / episode["duration_ms"]) * 100)
@@ -144,16 +133,16 @@ class Agent:
             )
 
         # Show saved podcasts
-        shows = self.spotify.get_saved_shows(limit=5)
+        shows = self.client.get_saved_shows(limit=5)
         if shows:
-            show_list = "\n".join(f"  • {s['name']}" for s in shows)
+            show_list = "\n".join(f"  - {s['name']}" for s in shows)
             return AgentResponse(
                 message=f"Your saved podcasts:\n{show_list}",
                 action_taken="podcast_list",
             )
 
         return AgentResponse(
-            message="No podcasts playing. Save some shows on Spotify first.",
+            message=f"Podcasts not available or none saved on {self.platform_name}.",
             success=False,
         )
 
@@ -165,7 +154,7 @@ class Agent:
 
         if not candidates:
             return AgentResponse(
-                message="Couldn't find matching tracks. Try being more specific or check your Spotify library.",
+                message=f"Couldn't find matching tracks on {self.platform_name}. Try different keywords.",
                 success=False,
             )
 
@@ -173,19 +162,19 @@ class Agent:
         ranked_tracks = self._rank_tracks(candidates, intent)
 
         if not ranked_tracks:
-            return AgentResponse(
-                message="Found tracks but none matched your mood. Playing what I found anyway.",
-                tracks_played=candidates[:10],
-                success=True,
-            )
+            ranked_tracks = candidates[:20]  # Fallback to unranked
 
         # Step 3: Play tracks
-        track_uris = [t.uri for t in ranked_tracks[:20]]  # Limit to 20
-        success = self.spotify.play_tracks(track_uris)
+        track_uris = [t.uri for t in ranked_tracks[:20]]
+        success = self.client.play_tracks(track_uris)
 
-        if not success:
-            # Check if it's a device issue
-            devices = self.spotify.get_devices()
+        # For YouTube Music, playback opens in browser
+        open_url = None
+        if self.client.platform == Platform.YOUTUBE_MUSIC and ranked_tracks:
+            open_url = self.client.get_web_url(ranked_tracks[0])
+
+        if not success and self.client.platform == Platform.SPOTIFY:
+            devices = self.client.get_devices()
             if not devices:
                 return AgentResponse(
                     message="No Spotify device found. Open Spotify on any device and try again.",
@@ -198,7 +187,7 @@ class Agent:
 
         # Step 4: Record to memory
         mood_str = intent.mood.value if intent.mood else "neutral"
-        for track in ranked_tracks[:5]:  # Record top 5 as "played"
+        for track in ranked_tracks[:5]:
             self.memory.record(
                 track_id=track.id,
                 track_name=track.name,
@@ -215,11 +204,19 @@ class Agent:
         mood_desc = f" {intent.mood.value}" if intent.mood != Mood.NEUTRAL else ""
         lang_desc = f" {intent.language}" if intent.language else ""
 
+        msg = f"Playing{mood_desc}{lang_desc}: {first_track.name} by {first_track.artist}"
+        if count > 1:
+            msg += f" (+{count - 1} more)"
+
+        if self.client.platform == Platform.YOUTUBE_MUSIC:
+            msg += "\n[Opening in browser]"
+
         return AgentResponse(
-            message=f"Playing{mood_desc}{lang_desc}: {first_track.name} by {first_track.artist} (+{count - 1} more)",
+            message=msg,
             tracks_played=ranked_tracks[:10],
             action_taken="play_music",
             success=True,
+            open_url=open_url,
         )
 
     def _gather_candidates(self, intent: Intent) -> list[Track]:
@@ -228,42 +225,42 @@ class Agent:
 
         # If artist specified, search for artist
         if intent.artist:
-            search_query = f"artist:{intent.artist}"
+            search_query = intent.artist
             if intent.language:
                 search_query += f" {intent.language}"
-            candidates.extend(self.spotify.search_tracks(search_query, limit=30))
+            candidates.extend(self.client.search_tracks(search_query, limit=30))
 
         # If high familiarity requested, prioritize liked songs
         if intent.familiarity == "high":
-            liked = self.spotify.get_liked_songs(limit=100)
+            liked = self.client.get_liked_songs(limit=100)
             candidates.extend(liked)
-
-        # Check memory for mood-associated tracks
-        if intent.mood != Mood.NEUTRAL:
-            mood_track_ids = self.memory.get_tracks_for_mood(intent.mood.value, limit=20)
-            # We'd need to fetch these tracks by ID, but that's expensive
-            # For now, we use them to boost ranking later
 
         # If language specified, search by language
         if intent.language:
-            lang_query = f"{intent.language} {intent.mood.value if intent.mood != Mood.NEUTRAL else ''}"
-            candidates.extend(self.spotify.search_tracks(lang_query.strip(), limit=30))
+            lang_query = f"{intent.language} songs"
+            if intent.mood != Mood.NEUTRAL:
+                lang_query = f"{intent.language} {intent.mood.value} songs"
+            candidates.extend(self.client.search_tracks(lang_query, limit=30))
 
         # If we still don't have enough, use recently played and top tracks
         if len(candidates) < 20:
-            candidates.extend(self.spotify.get_recently_played(limit=30))
-            candidates.extend(self.spotify.get_top_tracks(limit=30))
+            candidates.extend(self.client.get_recently_played(limit=30))
+            candidates.extend(self.client.get_top_tracks(limit=30))
 
         # If still nothing and we have a mood, search by mood
         if len(candidates) < 10 and intent.mood != Mood.NEUTRAL:
-            mood_query = intent.mood.value + " music"
-            candidates.extend(self.spotify.search_tracks(mood_query, limit=20))
+            mood_query = f"{intent.mood.value} music"
+            candidates.extend(self.client.search_tracks(mood_query, limit=20))
+
+        # Last resort: just search for popular music
+        if len(candidates) < 5:
+            candidates.extend(self.client.search_tracks("popular hits", limit=20))
 
         # Deduplicate by track ID
         seen = set()
         unique = []
         for track in candidates:
-            if track.id not in seen:
+            if track.id and track.id not in seen:
                 seen.add(track.id)
                 unique.append(track)
 
@@ -274,44 +271,49 @@ class Agent:
         if not tracks:
             return []
 
-        # Get audio features for filtering
-        track_ids = [t.id for t in tracks]
-        features_list = self._get_features(track_ids)
-        features_map = {f.track_id: f for f in features_list}
-
         # Get tracks that performed well for this mood from memory
         good_track_ids = set()
         if intent.mood != Mood.NEUTRAL:
             good_track_ids = set(self.memory.get_tracks_for_mood(intent.mood.value, limit=50))
+
+        # Try to get audio features (Spotify only)
+        features_map = {}
+        if self.client.platform == Platform.SPOTIFY:
+            track_ids = [t.id for t in tracks]
+            features_list = self._get_features(track_ids)
+            features_map = {f["track_id"]: f for f in features_list}
 
         # Score each track
         scored: list[tuple[Track, float]] = []
 
         for track in tracks:
             score = 0.0
-            features = features_map.get(track.id)
 
             # Boost if track was good for this mood before
             if track.id in good_track_ids:
                 score += 3.0
 
-            # Match energy level
+            # Match energy level (if we have audio features)
+            features = features_map.get(track.id)
             if features:
-                energy_diff = abs(features.energy - intent.energy_level)
-                score += (1 - energy_diff) * 2  # Up to 2 points for energy match
+                energy_diff = abs(features.get("energy", 0.5) - intent.energy_level)
+                score += (1 - energy_diff) * 2
 
                 # Match valence for happy/sad moods
-                if intent.mood == Mood.SAD and features.valence < 0.4:
+                valence = features.get("valence", 0.5)
+                energy = features.get("energy", 0.5)
+
+                if intent.mood == Mood.SAD and valence < 0.4:
                     score += 1.5
-                elif intent.mood == Mood.HAPPY and features.valence > 0.6:
+                elif intent.mood == Mood.HAPPY and valence > 0.6:
                     score += 1.5
-                elif intent.mood == Mood.CALM and features.energy < 0.4:
+                elif intent.mood == Mood.CALM and energy < 0.4:
                     score += 1.5
-                elif intent.mood == Mood.ENERGETIC and features.energy > 0.7:
+                elif intent.mood == Mood.ENERGETIC and energy > 0.7:
                     score += 1.5
 
             # Popularity as tiebreaker
-            score += track.popularity / 200  # Small boost, max 0.5
+            score += track.popularity / 200
 
             scored.append((track, score))
 
@@ -320,26 +322,30 @@ class Agent:
 
         return [t for t, _ in scored]
 
-    def _get_features(self, track_ids: list[str]) -> list[AudioFeatures]:
-        """Get audio features with caching."""
+    def _get_features(self, track_ids: list[str]) -> list[dict]:
+        """Get audio features with caching (Spotify only)."""
+        if self.client.platform != Platform.SPOTIFY:
+            return []
+
         uncached = [tid for tid in track_ids if tid not in self._features_cache]
 
         if uncached:
-            new_features = self.spotify.get_audio_features(uncached)
+            new_features = self.client.get_audio_features(uncached)
             for f in new_features:
-                self._features_cache[f.track_id] = f
+                if isinstance(f, dict) and f.get("track_id"):
+                    self._features_cache[f["track_id"]] = f
 
         return [self._features_cache[tid] for tid in track_ids if tid in self._features_cache]
 
     def record_skip(self, track: Track, mood: str) -> None:
-        """Record that a track was skipped (called externally when skip detected)."""
+        """Record that a track was skipped."""
         self.memory.record(
             track_id=track.id,
             track_name=track.name,
             artist=track.artist,
             action="skipped",
             mood=mood,
-            energy=0.5,  # Unknown
+            energy=0.5,
         )
 
     def record_completion(self, track: Track, mood: str) -> None:

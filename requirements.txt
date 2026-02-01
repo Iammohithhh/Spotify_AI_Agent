@@ -1,6 +1,7 @@
 # Core
 python-dotenv>=1.0.0
 spotipy>=2.23.0
+ytmusicapi>=1.8.0
 
 # CLI
 rich>=13.0.0

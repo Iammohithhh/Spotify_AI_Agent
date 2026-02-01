@@ -1,16 +1,22 @@
 """
-Configuration management for Spotify AI Agent.
+Configuration management for Music AI Agent.
 Uses environment variables with .env file support.
 """
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from enum import Enum
 
 from dotenv import load_dotenv
 
 # Load .env file if it exists
 load_dotenv()
+
+
+class Platform(Enum):
+    SPOTIFY = "spotify"
+    YOUTUBE_MUSIC = "youtube_music"
 
 
 @dataclass
@@ -31,6 +37,12 @@ class SpotifyConfig:
 
 
 @dataclass
+class YouTubeMusicConfig:
+    auth_file: Path | None = None
+    auth_type: str = "oauth"  # "oauth" or "browser"
+
+
+@dataclass
 class LLMConfig:
     provider: str  # "groq", "gemini", "rule_based"
     api_key: str | None = None
@@ -39,7 +51,9 @@ class LLMConfig:
 
 @dataclass
 class Config:
+    platform: Platform
     spotify: SpotifyConfig
+    youtube_music: YouTubeMusicConfig
     llm: LLMConfig
     data_dir: Path
     debug: bool = False
@@ -48,11 +62,28 @@ class Config:
 def load_config() -> Config:
     """Load configuration from environment variables."""
 
+    # Platform selection - defaults to youtube_music (no API key needed)
+    platform_str = os.getenv("MUSIC_PLATFORM", "youtube_music").lower()
+    platform = Platform.YOUTUBE_MUSIC
+    if platform_str == "spotify":
+        platform = Platform.SPOTIFY
+
+    # Data directory for memory/notes
+    data_dir = Path(os.getenv("DATA_DIR", "./data"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+
     # Spotify config
     spotify = SpotifyConfig(
         client_id=os.getenv("SPOTIFY_CLIENT_ID", ""),
         client_secret=os.getenv("SPOTIFY_CLIENT_SECRET", ""),
         redirect_uri=os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback"),
+    )
+
+    # YouTube Music config
+    yt_auth_file = os.getenv("YTMUSIC_AUTH_FILE", "")
+    youtube_music = YouTubeMusicConfig(
+        auth_file=Path(yt_auth_file) if yt_auth_file else data_dir / "ytmusic_auth.json",
+        auth_type=os.getenv("YTMUSIC_AUTH_TYPE", "oauth"),
     )
 
     # LLM config - defaults to rule_based (free, no API needed)
@@ -63,12 +94,10 @@ def load_config() -> Config:
         model=os.getenv("LLM_MODEL", _default_model(llm_provider)),
     )
 
-    # Data directory for memory/notes
-    data_dir = Path(os.getenv("DATA_DIR", "./data"))
-    data_dir.mkdir(parents=True, exist_ok=True)
-
     return Config(
+        platform=platform,
         spotify=spotify,
+        youtube_music=youtube_music,
         llm=llm,
         data_dir=data_dir,
         debug=os.getenv("DEBUG", "false").lower() == "true",
