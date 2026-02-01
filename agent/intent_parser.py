@@ -13,6 +13,8 @@ class ContentType(Enum):
     PODCAST = "podcast"
     CONTROL = "control"  # play, pause, skip, etc.
     QUERY = "query"      # what's playing, etc.
+    NOTE = "note"        # take note, save note, etc.
+    RECOMMEND = "recommend"  # get recommendations
     UNKNOWN = "unknown"
 
 
@@ -109,6 +111,26 @@ class IntentParser:
         r"\bshow\b",
     ]
 
+    # Note-taking patterns
+    NOTE_PATTERNS = [
+        r"\bnote\b",
+        r"\bsave\b.*\b(note|thought|idea)\b",
+        r"\bremember\b",
+        r"\bkey (point|idea|takeaway)\b",
+        r"\bwrite down\b",
+        r"\badd note\b",
+    ]
+
+    # Recommendation patterns
+    RECOMMEND_PATTERNS = [
+        r"\brecommend\b",
+        r"\bsuggest\b",
+        r"\bwhat should i\b",
+        r"\bsurprise me\b",
+        r"\bsomething (new|different)\b",
+        r"\bdiscover\b",
+    ]
+
     def parse(self, text: str) -> Intent:
         """Parse user text into structured intent."""
         text_lower = text.lower().strip()
@@ -127,6 +149,23 @@ class IntentParser:
             return Intent(
                 content_type=ContentType.QUERY,
                 raw_query=text,
+            )
+
+        # Check for note-taking
+        if self._is_note(text_lower):
+            return Intent(
+                content_type=ContentType.NOTE,
+                raw_query=text,
+                extras={"note_text": self._extract_note_content(text)},
+            )
+
+        # Check for recommendations
+        if self._is_recommend(text_lower):
+            return Intent(
+                content_type=ContentType.RECOMMEND,
+                raw_query=text,
+                mood=self._detect_mood(text_lower),
+                language=self._detect_language(text_lower),
             )
 
         # Check for podcast
@@ -172,6 +211,28 @@ class IntentParser:
     def _is_podcast(self, text: str) -> bool:
         """Check if text mentions podcasts."""
         return any(re.search(p, text, re.IGNORECASE) for p in self.PODCAST_PATTERNS)
+
+    def _is_note(self, text: str) -> bool:
+        """Check if text is a note-taking request."""
+        return any(re.search(p, text, re.IGNORECASE) for p in self.NOTE_PATTERNS)
+
+    def _is_recommend(self, text: str) -> bool:
+        """Check if text is a recommendation request."""
+        return any(re.search(p, text, re.IGNORECASE) for p in self.RECOMMEND_PATTERNS)
+
+    def _extract_note_content(self, text: str) -> str:
+        """Extract the actual note content from text."""
+        # Remove common prefixes
+        prefixes = [
+            r"^(add\s+)?note:?\s*",
+            r"^save\s+(this\s+)?note:?\s*",
+            r"^remember:?\s*",
+            r"^write\s+down:?\s*",
+        ]
+        result = text
+        for prefix in prefixes:
+            result = re.sub(prefix, "", result, flags=re.IGNORECASE)
+        return result.strip()
 
     def _detect_mood(self, text: str) -> Mood:
         """Detect mood from text."""

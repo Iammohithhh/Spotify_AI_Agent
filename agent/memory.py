@@ -1,16 +1,36 @@
 """
 Memory engine for learning user preferences.
 Stores and retrieves song interactions, mood associations, and listening patterns.
+Enhanced with time-based patterns and recommendation scoring.
 """
 
 import json
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
+from collections import defaultdict
 
 
-ActionType = Literal["played", "skipped", "replayed", "completed", "queued"]
+ActionType = Literal["played", "skipped", "replayed", "completed", "queued", "liked"]
+
+
+def get_time_of_day() -> str:
+    """Get current time of day category."""
+    hour = datetime.now().hour
+    if 5 <= hour < 12:
+        return "morning"
+    elif 12 <= hour < 17:
+        return "afternoon"
+    elif 17 <= hour < 21:
+        return "evening"
+    else:
+        return "night"
+
+
+def get_day_type() -> str:
+    """Get day type (weekday/weekend)."""
+    return "weekend" if datetime.now().weekday() >= 5 else "weekday"
 
 
 @dataclass
@@ -24,7 +44,7 @@ class MemoryEntry:
     language: str | None
     energy: float
     timestamp: str
-    context: dict = field(default_factory=dict)  # Additional context like time of day
+    context: dict = field(default_factory=dict)  # time_of_day, day_type, query, etc.
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -32,6 +52,29 @@ class MemoryEntry:
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryEntry":
         return cls(**data)
+
+    @property
+    def age_days(self) -> float:
+        """Get age of entry in days."""
+        try:
+            entry_time = datetime.fromisoformat(self.timestamp)
+            return (datetime.now() - entry_time).total_seconds() / 86400
+        except ValueError:
+            return 30  # Default to old if can't parse
+
+
+@dataclass
+class TrackScore:
+    """Aggregated score for a track."""
+    track_id: str
+    track_name: str
+    artist: str
+    score: float
+    play_count: int
+    skip_count: int
+    last_played: str
+    moods: list[str]
+    languages: list[str]
 
 
 @dataclass
@@ -91,8 +134,19 @@ class Memory:
         language: str | None = None,
         energy: float = 0.5,
         context: dict | None = None,
+        query: str | None = None,
     ) -> None:
-        """Record a track interaction."""
+        """Record a track interaction with rich context."""
+        # Build context with time patterns
+        full_context = {
+            "time_of_day": get_time_of_day(),
+            "day_type": get_day_type(),
+            "hour": datetime.now().hour,
+            **(context or {}),
+        }
+        if query:
+            full_context["query"] = query
+
         entry = MemoryEntry(
             track_id=track_id,
             track_name=track_name,
@@ -102,7 +156,7 @@ class Memory:
             language=language,
             energy=energy,
             timestamp=datetime.now().isoformat(),
-            context=context or {},
+            context=full_context,
         )
         self.entries.append(entry)
         self._save()
@@ -237,3 +291,227 @@ class Memory:
         """Clear all memory (use with caution)."""
         self.entries = []
         self._save()
+
+    # -------------------------------------------------------------------------
+    # Advanced Recommendation Methods
+    # -------------------------------------------------------------------------
+
+    def get_time_based_recommendations(self, limit: int = 20) -> list[str]:
+        """
+        Get recommendations based on current time patterns.
+        Returns tracks commonly played at this time of day.
+        """
+        current_time = get_time_of_day()
+        current_day = get_day_type()
+
+        # Find tracks played at similar times
+        time_matches = [
+            e for e in self.entries
+            if e.context.get("time_of_day") == current_time
+            and e.action in ("played", "completed", "replayed")
+        ]
+
+        # Score by frequency and recency
+        track_scores: dict[str, float] = defaultdict(float)
+        for entry in time_matches:
+            # Base score
+            score = 1.0
+            if entry.action == "replayed":
+                score = 2.0
+            elif entry.action == "completed":
+                score = 1.5
+
+            # Recency boost (decay over 30 days)
+            age = entry.age_days
+            recency_factor = max(0.1, 1.0 - (age / 30))
+            score *= recency_factor
+
+            # Day type bonus
+            if entry.context.get("day_type") == current_day:
+                score *= 1.2
+
+            track_scores[entry.track_id] += score
+
+        # Sort and return
+        sorted_tracks = sorted(track_scores.items(), key=lambda x: -x[1])
+        return [tid for tid, _ in sorted_tracks[:limit]]
+
+    def get_similar_mood_tracks(self, mood: str, limit: int = 20) -> list[TrackScore]:
+        """
+        Get tracks with detailed scoring for a mood.
+        Returns TrackScore objects with full metadata.
+        """
+        mood_entries = [e for e in self.entries if e.mood == mood]
+
+        # Aggregate by track
+        track_data: dict[str, dict] = {}
+        for entry in mood_entries:
+            tid = entry.track_id
+            if tid not in track_data:
+                track_data[tid] = {
+                    "track_name": entry.track_name,
+                    "artist": entry.artist,
+                    "plays": 0,
+                    "skips": 0,
+                    "score": 0.0,
+                    "last_played": entry.timestamp,
+                    "moods": set(),
+                    "languages": set(),
+                }
+
+            data = track_data[tid]
+
+            # Count actions
+            if entry.action == "skipped":
+                data["skips"] += 1
+                data["score"] -= 1.0
+            elif entry.action == "replayed":
+                data["plays"] += 1
+                data["score"] += 2.5
+            elif entry.action == "completed":
+                data["plays"] += 1
+                data["score"] += 1.5
+            elif entry.action == "played":
+                data["plays"] += 1
+                data["score"] += 0.5
+            elif entry.action == "liked":
+                data["score"] += 3.0
+
+            # Track moods and languages
+            data["moods"].add(entry.mood)
+            if entry.language:
+                data["languages"].add(entry.language)
+
+            # Update last played
+            if entry.timestamp > data["last_played"]:
+                data["last_played"] = entry.timestamp
+
+        # Convert to TrackScore objects
+        results = []
+        for tid, data in track_data.items():
+            if data["score"] > 0:  # Only positive scores
+                results.append(TrackScore(
+                    track_id=tid,
+                    track_name=data["track_name"],
+                    artist=data["artist"],
+                    score=data["score"],
+                    play_count=data["plays"],
+                    skip_count=data["skips"],
+                    last_played=data["last_played"],
+                    moods=list(data["moods"]),
+                    languages=list(data["languages"]),
+                ))
+
+        # Sort by score
+        results.sort(key=lambda x: -x.score)
+        return results[:limit]
+
+    def get_artist_affinity(self) -> dict[str, float]:
+        """
+        Get user's affinity scores for artists.
+        Higher score = user likes this artist more.
+        """
+        artist_scores: dict[str, float] = defaultdict(float)
+        artist_plays: dict[str, int] = defaultdict(int)
+
+        for entry in self.entries:
+            artist = entry.artist
+            artist_plays[artist] += 1
+
+            if entry.action == "skipped":
+                artist_scores[artist] -= 0.5
+            elif entry.action in ("played", "completed"):
+                artist_scores[artist] += 1.0
+            elif entry.action == "replayed":
+                artist_scores[artist] += 2.0
+            elif entry.action == "liked":
+                artist_scores[artist] += 3.0
+
+        # Normalize by play count
+        for artist in artist_scores:
+            if artist_plays[artist] > 0:
+                artist_scores[artist] /= artist_plays[artist]
+
+        return dict(artist_scores)
+
+    def get_language_preferences(self) -> dict[str, float]:
+        """Get user's language preferences as scores."""
+        lang_scores: dict[str, float] = defaultdict(float)
+        lang_counts: dict[str, int] = defaultdict(int)
+
+        for entry in self.entries:
+            if entry.language:
+                lang_counts[entry.language] += 1
+                if entry.action in ("played", "completed", "replayed", "liked"):
+                    lang_scores[entry.language] += 1.0
+                elif entry.action == "skipped":
+                    lang_scores[entry.language] -= 0.3
+
+        # Normalize
+        total = sum(lang_counts.values()) or 1
+        return {lang: count / total for lang, count in lang_counts.items()}
+
+    def get_listening_patterns(self) -> dict:
+        """
+        Analyze listening patterns for insights.
+        Returns patterns by time, mood, language, etc.
+        """
+        patterns = {
+            "by_time_of_day": defaultdict(int),
+            "by_day_type": defaultdict(int),
+            "by_hour": defaultdict(int),
+            "mood_by_time": defaultdict(lambda: defaultdict(int)),
+            "total_listening_sessions": 0,
+            "avg_tracks_per_session": 0,
+        }
+
+        for entry in self.entries:
+            if entry.action in ("played", "completed", "replayed"):
+                time_of_day = entry.context.get("time_of_day", "unknown")
+                day_type = entry.context.get("day_type", "unknown")
+                hour = entry.context.get("hour", 0)
+
+                patterns["by_time_of_day"][time_of_day] += 1
+                patterns["by_day_type"][day_type] += 1
+                patterns["by_hour"][hour] += 1
+                patterns["mood_by_time"][time_of_day][entry.mood] += 1
+
+        # Convert defaultdicts to regular dicts
+        patterns["by_time_of_day"] = dict(patterns["by_time_of_day"])
+        patterns["by_day_type"] = dict(patterns["by_day_type"])
+        patterns["by_hour"] = dict(patterns["by_hour"])
+        patterns["mood_by_time"] = {k: dict(v) for k, v in patterns["mood_by_time"].items()}
+
+        return patterns
+
+    def suggest_mood_for_time(self) -> str | None:
+        """
+        Suggest a mood based on current time patterns.
+        Returns the mood most commonly listened to at this time.
+        """
+        current_time = get_time_of_day()
+
+        mood_counts: dict[str, int] = defaultdict(int)
+        for entry in self.entries:
+            if entry.context.get("time_of_day") == current_time:
+                if entry.action in ("played", "completed", "replayed"):
+                    mood_counts[entry.mood] += 1
+
+        if not mood_counts:
+            return None
+
+        return max(mood_counts.items(), key=lambda x: x[1])[0]
+
+    def export_insights(self) -> dict:
+        """Export all insights for display or analysis."""
+        return {
+            "stats": self.get_stats(),
+            "patterns": self.get_listening_patterns(),
+            "artist_affinity": dict(sorted(
+                self.get_artist_affinity().items(),
+                key=lambda x: -x[1]
+            )[:10]),
+            "language_preferences": self.get_language_preferences(),
+            "suggested_mood": self.suggest_mood_for_time(),
+            "favorite_artists": self.get_favorite_artists(limit=10),
+        }

@@ -348,6 +348,7 @@ def setup_youtube_auth(auth_file: Path) -> bool:
     """
     from rich.console import Console
     from rich.panel import Panel
+    import ytmusicapi
 
     console = Console()
 
@@ -363,20 +364,24 @@ def setup_youtube_auth(auth_file: Path) -> bool:
     choice = input("\nEnter choice (1 or 2): ").strip()
 
     try:
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+
         if choice == "1":
             console.print("\n[dim]Opening browser for Google login...[/dim]")
-            YTMusic.setup(filepath=str(auth_file), open_browser=True)
+            # Use the new ytmusicapi.setup_oauth function
+            ytmusicapi.setup_oauth(filepath=str(auth_file), open_browser=True)
             console.print(f"[green]Authentication saved to {auth_file}[/green]")
             return True
         elif choice == "2":
             console.print("\n[yellow]Browser header authentication:[/yellow]")
-            console.print("1. Open YouTube Music in your browser")
+            console.print("1. Open YouTube Music in your browser (music.youtube.com)")
             console.print("2. Open Developer Tools (F12)")
-            console.print("3. Go to Network tab")
+            console.print("3. Go to Network tab, refresh the page")
             console.print("4. Click on any request to music.youtube.com")
-            console.print("5. Copy the 'cookie' header value")
-            console.print("\nPaste the headers when prompted by ytmusicapi.\n")
-            YTMusic.setup(filepath=str(auth_file))
+            console.print("5. Find 'Request Headers' section")
+            console.print("6. Copy the entire 'cookie' header value\n")
+            console.print("[dim]Paste when prompted and press Enter twice.[/dim]\n")
+            ytmusicapi.setup(filepath=str(auth_file))
             console.print(f"[green]Authentication saved to {auth_file}[/green]")
             return True
         else:

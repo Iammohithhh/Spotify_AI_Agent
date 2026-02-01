@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from agent.intent_parser import Intent, IntentParser, ContentType, ControlAction, Mood
 from agent.memory import Memory
 from tools.base import MusicClient, Track, Platform
+from tools.notes import NotesManager
 from config import Config
 
 
@@ -34,9 +35,14 @@ class Agent:
         self.client = music_client
         self.parser = IntentParser()
         self.memory = Memory(config.data_dir / "memory.json")
+        self.notes = NotesManager(config.data_dir)
 
         # Cache for audio features (Spotify only)
         self._features_cache: dict[str, dict] = {}
+
+        # Track current state for notes
+        self._current_podcast: dict | None = None
+        self._last_mood: str = "neutral"
 
     @property
     def platform_name(self) -> str:
@@ -57,6 +63,10 @@ class Agent:
             return self._handle_query(intent)
         elif intent.content_type == ContentType.PODCAST:
             return self._handle_podcast(intent)
+        elif intent.content_type == ContentType.NOTE:
+            return self._handle_note(intent)
+        elif intent.content_type == ContentType.RECOMMEND:
+            return self._handle_recommend(intent)
         elif intent.content_type == ContentType.MUSIC:
             return self._handle_music(intent)
         else:
@@ -143,6 +153,110 @@ class Agent:
 
         return AgentResponse(
             message=f"Podcasts not available or none saved on {self.platform_name}.",
+            success=False,
+        )
+
+    def _handle_note(self, intent: Intent) -> AgentResponse:
+        """Handle note-taking for podcasts or music."""
+        note_text = intent.extras.get("note_text", intent.raw_query)
+
+        # Check if there's a current podcast
+        episode = self.client.get_current_episode()
+
+        if episode:
+            # Save note for podcast
+            self._current_podcast = episode
+            note = self.notes.add_note(
+                episode_id=episode["id"],
+                episode_name=episode["name"],
+                show_name=episode.get("show", "Unknown"),
+                description=episode.get("description", ""),
+                duration_ms=episode.get("duration_ms", 0),
+                listened_ms=episode.get("progress_ms", 0),
+                user_notes=note_text,
+                mood=self._last_mood,
+            )
+            return AgentResponse(
+                message=f"Note saved for '{episode['name']}':\n\"{note_text}\"",
+                action_taken="note_saved",
+            )
+
+        # Check current playback state for music
+        state = self.client.get_playback_state()
+        if state and state.track:
+            # Save as a general note with track context
+            return AgentResponse(
+                message=f"Note while listening to '{state.track.name}':\n\"{note_text}\"\n\n(Podcast notes work best when listening to podcasts)",
+                action_taken="note_saved",
+            )
+
+        return AgentResponse(
+            message=f"Note saved: \"{note_text}\"\n\n(Start a podcast for richer notes!)",
+            action_taken="note_saved",
+        )
+
+    def _handle_recommend(self, intent: Intent) -> AgentResponse:
+        """Handle smart recommendation requests based on memory."""
+
+        # Get time-based recommendations
+        time_tracks = self.memory.get_time_based_recommendations(limit=10)
+
+        # Get mood suggestion based on patterns
+        suggested_mood = self.memory.suggest_mood_for_time()
+
+        # If we have enough history, use memory-based recommendations
+        if time_tracks:
+            # Search for similar tracks on the platform
+            # Use the mood from memory or intent
+            mood = suggested_mood or (intent.mood.value if intent.mood != Mood.NEUTRAL else "chill")
+            self._last_mood = mood
+
+            # Get favorite artists for seeding
+            fav_artists = self.memory.get_favorite_artists(limit=3)
+
+            # Build a smart query
+            if fav_artists and intent.language:
+                query = f"{intent.language} {mood} music {fav_artists[0]}"
+            elif fav_artists:
+                query = f"{mood} music like {fav_artists[0]}"
+            else:
+                query = f"{mood} music recommendations"
+
+            # Search and play
+            tracks = self.client.search_tracks(query, limit=20)
+
+            if tracks:
+                track_uris = [t.uri for t in tracks]
+                success = self.client.play_tracks(track_uris)
+
+                open_url = None
+                if self.client.platform == Platform.YOUTUBE_MUSIC and tracks:
+                    open_url = self.client.get_web_url(tracks[0])
+
+                mood_msg = f"Based on your {suggested_mood} mood at this time" if suggested_mood else "Based on your listening history"
+
+                return AgentResponse(
+                    message=f"{mood_msg}, playing: {tracks[0].name} by {tracks[0].artist} (+{len(tracks)-1} more)",
+                    tracks_played=tracks[:10],
+                    action_taken="recommend",
+                    success=success,
+                    open_url=open_url,
+                )
+
+        # Fallback: no history yet, use intent mood or random
+        mood = intent.mood.value if intent.mood != Mood.NEUTRAL else "popular"
+        tracks = self.client.search_tracks(f"{mood} hits", limit=20)
+
+        if tracks:
+            self.client.play_tracks([t.uri for t in tracks])
+            return AgentResponse(
+                message=f"Here's some {mood} music to get started! Keep listening to build your personal recommendations.",
+                tracks_played=tracks[:10],
+                action_taken="recommend",
+            )
+
+        return AgentResponse(
+            message="Couldn't generate recommendations. Try playing some music first!",
             success=False,
         )
 
