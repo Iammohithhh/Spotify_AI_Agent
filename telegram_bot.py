@@ -144,28 +144,79 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text = """
 🎵 *Music AI Agent - Help*
 
-*Natural Language:*
-Just type what you want to hear!
-• "Play happy Hindi songs"
+*Just chat naturally!*
+• "Play some sad Telugu songs"
+• "What song is this?"
+• "Tell me about this artist"
 • "Something calm for sleeping"
-• "Energetic music for gym"
+• "Who sings this?"
 
 *Quick Controls:*
 • "next" / "skip" - Next track
 • "pause" / "stop" - Pause playback
 • "play" / "resume" - Resume
-• "what's playing" - Current track
 
 *Commands:*
 /play - Quick mood buttons
+/now - What's playing now
 /stats - Your listening history
 /notes - Podcast notes
 /help - This message
 
-*Supported Languages:*
-Telugu, Kannada, Hindi, Tamil, Malayalam, English, Korean, Spanish, Punjabi
+*Ask me anything about music!*
 """
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+async def now_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /now command - show current track with details."""
+    config = load_config()
+    agent = get_user_agent(update.effective_user.id, config)
+
+    state = agent.client.get_playback_state()
+
+    if not state or not state.track:
+        await update.message.reply_text(
+            "🔇 *Nothing playing right now*\n\nTry asking for some music!",
+            parse_mode="Markdown",
+            reply_markup=get_mood_keyboard(),
+        )
+        return
+
+    track = state.track
+    status_emoji = "▶️" if state.is_playing else "⏸"
+
+    # Get track URL
+    track_url = None
+    if agent.client.platform == Platform.YOUTUBE_MUSIC:
+        track_url = agent.client.get_web_url(track)
+
+    msg = f"""
+{status_emoji} *Now Playing*
+
+🎵 *{track.name}*
+👤 {track.artist}
+💿 {track.album or 'Unknown Album'}
+
+_Ask me anything about this song or artist!_
+"""
+
+    keyboard = [
+        [
+            InlineKeyboardButton("⏮ Prev", callback_data="control_prev"),
+            InlineKeyboardButton("⏸ Pause" if state.is_playing else "▶️ Play", callback_data="control_pause" if state.is_playing else "control_play"),
+            InlineKeyboardButton("⏭ Next", callback_data="control_next"),
+        ],
+    ]
+
+    if track_url:
+        keyboard.append([InlineKeyboardButton("🔗 Open in App", url=track_url)])
+
+    await update.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -356,6 +407,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         action_map = {
             "prev": "previous",
+            "play": "resume",
             "pause": "pause",
             "next": "next",
             "shuffle": "shuffle",
@@ -403,6 +455,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("play", play_command))
+    app.add_handler(CommandHandler("now", now_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("notes", notes_command))
     app.add_handler(CallbackQueryHandler(handle_callback))

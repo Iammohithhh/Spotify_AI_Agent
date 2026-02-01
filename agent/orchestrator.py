@@ -2,12 +2,14 @@
 Agent Orchestrator - The core brain of the system.
 Coordinates intent parsing, memory, and music platform actions.
 Works with both Spotify and YouTube Music.
+Supports conversational AI when LLM is available.
 """
 
 from dataclasses import dataclass
 
 from agent.intent_parser import Intent, IntentParser, ContentType, ControlAction, Mood
 from agent.memory import Memory
+from agent.llm import ConversationalAgent
 from tools.base import MusicClient, Track, Platform
 from tools.notes import NotesManager
 from config import Config
@@ -28,14 +30,19 @@ class Agent:
     The main agent that orchestrates all components.
     This is the single entry point for user interactions.
     Works with any MusicClient implementation.
+    Supports conversational AI when LLM is configured.
     """
 
-    def __init__(self, config: Config, music_client: MusicClient):
+    def __init__(self, config: Config, music_client: MusicClient, conversational: bool = True):
         self.config = config
         self.client = music_client
         self.parser = IntentParser()
         self.memory = Memory(config.data_dir / "memory.json")
         self.notes = NotesManager(config.data_dir)
+
+        # Conversational agent (uses LLM if available)
+        self.conversational_mode = conversational
+        self.conversation = ConversationalAgent(config) if conversational else None
 
         # Cache for audio features (Spotify only)
         self._features_cache: dict[str, dict] = {}
@@ -49,31 +56,127 @@ class Agent:
         """Get human-readable platform name."""
         return "YouTube Music" if self.client.platform == Platform.YOUTUBE_MUSIC else "Spotify"
 
-    def run(self, user_input: str) -> AgentResponse:
+    def run(self, user_input: str, use_llm: bool = True) -> AgentResponse:
         """
         Main entry point. Process user input and return response.
+
+        Args:
+            user_input: The user's message
+            use_llm: Whether to use LLM for conversational responses (default True)
         """
-        # Step 1: Parse intent
+        # Update conversation context with current track
+        if self.conversation:
+            state = self.client.get_playback_state()
+            if state and state.track:
+                self.conversation.set_current_track({
+                    "name": state.track.name,
+                    "artist": state.track.artist,
+                    "album": state.track.album,
+                })
+            else:
+                self.conversation.set_current_track(None)
+
+        # Step 1: Parse intent using rule-based parser first
         intent = self.parser.parse(user_input)
 
-        # Step 2: Route to appropriate handler
+        # Step 2: For clear intents, use rule-based handlers
         if intent.content_type == ContentType.CONTROL:
             return self._handle_control(intent)
-        elif intent.content_type == ContentType.QUERY:
+        elif intent.content_type == ContentType.NOTE:
+            return self._handle_note(intent)
+
+        # Step 3: For ambiguous/conversational input, try LLM
+        if use_llm and self.conversation and intent.content_type == ContentType.UNKNOWN:
+            return self._handle_conversation(user_input)
+
+        # Step 4: Fall back to rule-based handlers
+        if intent.content_type == ContentType.QUERY:
             return self._handle_query(intent)
         elif intent.content_type == ContentType.PODCAST:
             return self._handle_podcast(intent)
-        elif intent.content_type == ContentType.NOTE:
-            return self._handle_note(intent)
         elif intent.content_type == ContentType.RECOMMEND:
             return self._handle_recommend(intent)
         elif intent.content_type == ContentType.MUSIC:
             return self._handle_music(intent)
         else:
+            # Try conversational if available
+            if self.conversation:
+                return self._handle_conversation(user_input)
             return AgentResponse(
                 message="I'm not sure what you want. Try asking for music by mood, language, or artist.",
                 success=False,
             )
+
+    def _handle_conversation(self, user_input: str) -> AgentResponse:
+        """Handle conversational input using LLM."""
+        if not self.conversation:
+            return AgentResponse(
+                message="Conversational mode not available. Try a specific command.",
+                success=False,
+            )
+
+        # Get LLM response
+        response_text, action = self.conversation.chat(user_input)
+
+        # If LLM suggests an action, execute it
+        if action:
+            if action["action"] == "play":
+                self.client.resume()
+                return AgentResponse(message=response_text, action_taken="play")
+
+            elif action["action"] == "pause":
+                self.client.pause()
+                return AgentResponse(message=response_text, action_taken="pause")
+
+            elif action["action"] == "next":
+                self.client.next_track()
+                return AgentResponse(message=response_text, action_taken="next")
+
+            elif action["action"] == "previous":
+                self.client.previous_track()
+                return AgentResponse(message=response_text, action_taken="previous")
+
+            elif action["action"] == "shuffle":
+                self.client.set_shuffle(True)
+                return AgentResponse(message=response_text, action_taken="shuffle")
+
+            elif action["action"] == "search":
+                # Execute search and play
+                query = action.get("query", user_input)
+                tracks = self.client.search_tracks(query, limit=20)
+
+                if tracks:
+                    self.client.play_tracks([t.uri for t in tracks])
+
+                    open_url = None
+                    if self.client.platform == Platform.YOUTUBE_MUSIC:
+                        open_url = self.client.get_web_url(tracks[0])
+
+                    # Record to memory
+                    for track in tracks[:5]:
+                        self.memory.record(
+                            track_id=track.id,
+                            track_name=track.name,
+                            artist=track.artist,
+                            action="played",
+                            mood=self._last_mood,
+                            query=query,
+                        )
+
+                    return AgentResponse(
+                        message=f"{response_text}\n\nPlaying: {tracks[0].name} by {tracks[0].artist}",
+                        tracks_played=tracks[:10],
+                        action_taken="search",
+                        open_url=open_url,
+                    )
+                else:
+                    return AgentResponse(
+                        message=f"{response_text}\n\nCouldn't find any tracks for that.",
+                        success=False,
+                    )
+
+        # Just a conversational response, no action
+        return AgentResponse(message=response_text, action_taken="chat")
 
     def _handle_control(self, intent: Intent) -> AgentResponse:
         """Handle playback control commands."""
