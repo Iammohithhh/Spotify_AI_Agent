@@ -329,9 +329,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Different response formats based on action type
     action = response.action_taken
 
-    # Info/Stats responses - no playback controls needed
+    # Conversational/Info/Stats responses - no playback controls needed
     if action in ["info", "stats", "chat"]:
-        emoji = "📊" if action == "stats" else "💬"
+        emoji_map = {"stats": "📊", "info": "ℹ️", "chat": "💬"}
+        emoji = emoji_map.get(action, "💬")
         await update.message.reply_text(
             f"{emoji} {response.message}",
             parse_mode="Markdown",

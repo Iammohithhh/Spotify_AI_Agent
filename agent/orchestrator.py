@@ -120,6 +120,10 @@ class Agent:
 
         # If LLM suggests an action, execute it
         if action:
+            if action["action"] == "chat":
+                # Pure conversation - just respond, no music action
+                return AgentResponse(message=response_text, action_taken="chat")
+
             if action["action"] == "info":
                 # Just return the response, no playback action
                 return AgentResponse(message=response_text, action_taken="info")

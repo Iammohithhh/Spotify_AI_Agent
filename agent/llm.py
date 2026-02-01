@@ -164,56 +164,61 @@ class ConversationalAgent:
     Falls back gracefully when LLM is not available.
     """
 
-    SYSTEM_PROMPT = """You are a friendly music AI assistant integrated with YouTube Music/Spotify. You help users with music discovery, playback control, and music conversations.
+    SYSTEM_PROMPT = """You are MusicBuddy, a friendly AI music assistant. You can control YouTube Music/Spotify and chat about music.
 
 CURRENT CONTEXT:
 {context}
 
-YOUR CAPABILITIES:
-1. Play music by mood, language, artist, genre
-2. Control playback (play, pause, next, previous, shuffle)
-3. Answer questions about the currently playing song/artist
-4. Provide music recommendations
-5. Have casual conversations about music
-
-RESPONSE FORMAT - Use these action tags when appropriate:
-- [PLAY] - Resume playback
-- [PAUSE] - Pause playback
+ACTION TAGS (use exactly ONE at the end of your response):
+- [CHAT] - For greetings, casual chat, questions about you, non-music conversations
+- [INFO] - For questions about current song/artist (use info from context)
+- [STATS] - When user wants listening history/statistics
+- [PLAY] - Resume paused playback
+- [PAUSE] - Pause current playback
 - [NEXT] - Skip to next track
-- [PREVIOUS] - Go to previous track
-- [SHUFFLE] - Enable shuffle
-- [SEARCH: query] - Search and play music (use descriptive query)
-- [INFO] - User wants information (don't search, just respond)
-- [STATS] - User wants their listening statistics
+- [PREVIOUS] - Go back one track
+- [SHUFFLE] - Enable shuffle mode
+- [SEARCH: query] - ONLY when user explicitly wants to play NEW music
 
-CRITICAL RULES:
-1. If user asks "what song is this" or "what's playing" - describe the current track from context, use [INFO]
-2. If user asks "tell me about this song/artist" - provide info about what's in context, use [INFO]
-3. If user says "stats" or asks about their listening history - use [STATS]
-4. If user wants to PLAY something new - use [SEARCH: descriptive query]
-5. If user is just chatting or asking questions - respond naturally, use [INFO]
-6. For podcasts, use [SEARCH: podcast topic intellectual discussion] format
+DECISION TREE (follow strictly):
+1. Is user greeting or chatting casually? → Respond warmly + [CHAT]
+2. Is user asking about YOU (name, capabilities)? → Introduce yourself + [CHAT]
+3. Is user asking about CURRENT song/artist? → Use context info + [INFO]
+4. Is user asking for stats/history? → [STATS]
+5. Is user giving playback commands? → Execute + appropriate control tag
+6. Is user explicitly requesting to PLAY/FIND music? → [SEARCH: query]
+7. Anything else (feelings, thoughts) → Respond empathetically + [CHAT]
+
+CRITICAL - DO NOT SEARCH when user:
+- Says "info", "tell me about", "what is this", "who sings this" → [INFO]
+- Says "hi", "hello", "chat", "talk to me", "what's your name" → [CHAT]
+- Shares feelings WITHOUT asking for music → [CHAT]
+- Asks questions about music theory/history → [INFO] or [CHAT]
+
+ONLY use [SEARCH] when user says:
+- "play", "find", "put on", "I want to listen to", "queue up"
+- Explicitly names songs/artists they want to hear
 
 EXAMPLES:
-User: "What song is this?"
-Response: Based on what's playing, this is "Song Name" by Artist. It's a popular track from their album... [INFO]
+User: "What's your name?"
+Response: I'm MusicBuddy, your AI music assistant! I can play music, answer questions about songs, and chat with you about music. What would you like to do? [CHAT]
 
-User: "Tell me about this artist"
-Response: The artist currently playing is X. They are known for... [INFO]
+User: "Information about this song"
+Response: {answer based on context - song name, artist, album info} [INFO]
+
+User: "I'm feeling cool today"
+Response: That's great to hear! Glad you're in a good mood. Would you like me to play some music to match your vibe? [CHAT]
 
 User: "Play some sad Telugu songs"
-Response: Let me find some emotional Telugu music for you. [SEARCH: sad Telugu emotional songs]
+Response: Finding some emotional Telugu music for you! [SEARCH: sad Telugu emotional songs]
 
 User: "Stats"
-Response: [STATS]
+Response: Let me show you your listening statistics! [STATS]
 
-User: "I'm feeling low"
-Response: I understand. Let me play something soothing for you. [SEARCH: comforting relaxing melancholy music]
+User: "Who is the artist?"
+Response: {use context to describe the artist currently playing} [INFO]
 
-User: "Play intellectual podcast"
-Response: Let me find a thought-provoking podcast for you. [SEARCH: intellectual discussion podcast educational]
-
-Be concise (2-3 sentences). Be helpful and friendly.
+Be concise, friendly, and ALWAYS end with exactly one action tag.
 """
 
     def __init__(self, config=None):
@@ -300,14 +305,20 @@ Be concise (2-3 sentences). Be helpful and friendly.
 
         text_upper = text.upper()
 
-        # Info/conversational - no playback action needed
+        # Chat/conversational - just respond, no music action
+        if "[CHAT]" in text_upper:
+            return {"action": "chat"}
+
+        # Info about current track - no playback action needed
         if "[INFO]" in text_upper:
             return {"action": "info"}
+
+        # Stats request
         if "[STATS]" in text_upper:
             return {"action": "stats"}
 
         # Playback controls
-        if "[PLAY]" in text_upper:
+        if "[PLAY]" in text_upper and "[SEARCH" not in text_upper:
             return {"action": "play"}
         if "[PAUSE]" in text_upper or "[STOP]" in text_upper:
             return {"action": "pause"}
@@ -318,73 +329,130 @@ Be concise (2-3 sentences). Be helpful and friendly.
         if "[SHUFFLE]" in text_upper:
             return {"action": "shuffle"}
 
-        # Search action
+        # Search action - ONLY if explicitly tagged
         search_match = re.search(r'\[SEARCH:\s*(.+?)\]', text, re.IGNORECASE)
         if search_match:
             return {"action": "search", "query": search_match.group(1).strip()}
 
-        return None
+        # Default to chat if no action found (don't default to search!)
+        return {"action": "chat"}
 
     def _clean_response(self, text: str) -> str:
         """Remove action tags from response."""
         import re
         # Remove all bracketed actions
-        text = re.sub(r'\[(?:PLAY|PAUSE|STOP|NEXT|SKIP|PREVIOUS|PREV|SHUFFLE|INFO|STATS)\]', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\[(?:PLAY|PAUSE|STOP|NEXT|SKIP|PREVIOUS|PREV|SHUFFLE|INFO|STATS|CHAT)\]', '', text, flags=re.IGNORECASE)
         text = re.sub(r'\[SEARCH:\s*.+?\]', '', text, flags=re.IGNORECASE)
         return text.strip()
 
     def _fallback_response(self, text: str) -> tuple[str, dict | None]:
-        """Simple fallback when LLM is not available."""
-        text_lower = text.lower()
+        """Smart fallback when LLM is not available."""
+        text_lower = text.lower().strip()
 
-        # Stats request
-        if text_lower in ["stats", "statistics", "my stats", "listening stats", "history"]:
-            return "Here are your stats!", {"action": "stats"}
+        # ═══════════════════════════════════════════════════════════════════════
+        # GREETINGS & CASUAL CHAT (No music action)
+        # ═══════════════════════════════════════════════════════════════════════
+        greetings = ["hi", "hello", "hey", "hola", "namaste", "yo", "sup", "howdy"]
+        if text_lower in greetings or text_lower.startswith(tuple(f"{g} " for g in greetings)):
+            return "Hey there! I'm MusicBuddy, your AI music assistant. I can play music, tell you about songs, and chat about music. What would you like?", {"action": "chat"}
 
-        # Info about current track
+        # Questions about the bot
         if any(phrase in text_lower for phrase in [
+            "your name", "who are you", "what are you", "what can you do",
+            "help me", "how do you work", "introduce yourself", "about you"
+        ]):
+            return "I'm MusicBuddy! I can play music based on your mood, control playback, answer questions about songs, and remember your preferences. Try 'play some chill music' or ask 'what song is this?'", {"action": "chat"}
+
+        # Pure chat requests
+        if any(phrase in text_lower for phrase in [
+            "chat with me", "talk to me", "let's talk", "let's chat",
+            "just chat", "wanna chat", "can we talk"
+        ]):
+            return "Sure, I'm here! What's on your mind? We can talk about music, your day, or I can play something for you.", {"action": "chat"}
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # FEELINGS (Just acknowledge, don't search unless they ask for music)
+        # ═══════════════════════════════════════════════════════════════════════
+        feeling_words = ["feeling", "i am", "i'm", "today i", "my mood"]
+        mood_words = ["cool", "good", "great", "awesome", "fine", "okay", "ok", "happy", "excited"]
+        negative_moods = ["sad", "low", "down", "depressed", "lonely", "tired", "stressed"]
+
+        if any(f in text_lower for f in feeling_words):
+            # Check if they're also asking for music
+            wants_music = any(w in text_lower for w in ["play", "music", "song", "listen", "put on"])
+
+            if any(m in text_lower for m in mood_words) and not wants_music:
+                return "That's great to hear! Glad you're feeling good. Want me to play some music to match your vibe?", {"action": "chat"}
+            elif any(m in text_lower for m in negative_moods) and not wants_music:
+                return "I hear you. Sometimes we all feel that way. Would you like me to play some comforting music?", {"action": "chat"}
+            elif not wants_music:
+                return "Thanks for sharing! Would you like me to play some music for you?", {"action": "chat"}
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # STATS REQUEST
+        # ═══════════════════════════════════════════════════════════════════════
+        if text_lower in ["stats", "statistics", "my stats", "listening stats", "history", "my history"]:
+            return "Here are your listening stats!", {"action": "stats"}
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # INFO ABOUT CURRENT TRACK (Use context, don't search!)
+        # ═══════════════════════════════════════════════════════════════════════
+        info_phrases = [
             "what song", "what's playing", "current song", "what is this",
             "tell me about this", "info about this", "about this song",
-            "who sings", "who is the artist", "what artist"
-        ]):
+            "who sings", "who is the artist", "what artist", "who's singing",
+            "information about", "details about", "about the song",
+            "about the artist", "tell me more", "more info", "song info",
+            "artist info", "what's this song", "which song", "name of this"
+        ]
+        if any(phrase in text_lower for phrase in info_phrases):
             if self._current_track:
                 name = self._current_track.get('name', 'Unknown')
                 artist = self._current_track.get('artist', 'Unknown')
                 album = self._current_track.get('album', '')
-                response = f"Currently playing: {name} by {artist}"
+                response = f"This is \"{name}\" by {artist}."
                 if album:
-                    response += f" from the album '{album}'"
+                    response += f" It's from the album \"{album}\"."
+                response += " Want to know more, or shall I play something similar?"
                 return response, {"action": "info"}
-            return "Nothing is playing right now. Ask me to play something!", {"action": "info"}
+            return "Nothing is playing right now. Want me to play something for you?", {"action": "info"}
 
-        # Playback controls
-        if any(word in text_lower for word in ["pause", "stop"]):
+        # ═══════════════════════════════════════════════════════════════════════
+        # PLAYBACK CONTROLS
+        # ═══════════════════════════════════════════════════════════════════════
+        if any(word in text_lower for word in ["pause", "stop"]) and "play" not in text_lower:
             return "Paused!", {"action": "pause"}
 
         if any(word in text_lower for word in ["next", "skip"]):
             return "Skipping to next track!", {"action": "next"}
 
         if any(word in text_lower for word in ["previous", "back", "go back"]):
-            return "Going back!", {"action": "previous"}
+            return "Going back to previous track!", {"action": "previous"}
 
         if text_lower in ["resume", "continue", "unpause"]:
-            return "Resuming!", {"action": "play"}
+            return "Resuming playback!", {"action": "play"}
 
         if "shuffle" in text_lower:
-            return "Shuffling!", {"action": "shuffle"}
+            return "Shuffle mode on!", {"action": "shuffle"}
 
-        # Podcast search
-        if "podcast" in text_lower:
-            query = text_lower.replace("play", "").strip()
-            if "intellectual" in text_lower or "educational" in text_lower:
-                return "Finding an intellectual podcast for you!", {"action": "search", "query": "intellectual discussion podcast TED educational"}
-            return f"Finding podcasts for you!", {"action": "search", "query": f"{query} podcast discussion"}
+        # ═══════════════════════════════════════════════════════════════════════
+        # EXPLICIT MUSIC/PODCAST SEARCH (Only when user clearly wants to play)
+        # ═══════════════════════════════════════════════════════════════════════
+        play_words = ["play", "put on", "queue", "listen to", "find me", "i want to hear"]
+        if any(word in text_lower for word in play_words):
+            # Podcast search
+            if "podcast" in text_lower:
+                query = text_lower
+                for word in play_words:
+                    query = query.replace(word, "")
+                query = query.strip()
+                if "intellectual" in text_lower or "educational" in text_lower:
+                    return "Finding an intellectual podcast for you!", {"action": "search", "query": "intellectual discussion podcast TED educational"}
+                return "Finding podcasts for you!", {"action": "search", "query": f"{query} podcast discussion"}
 
-        # Music search with mood
-        if any(word in text_lower for word in ["play", "want", "need", "some", "music", "songs", "feeling"]):
-            # Extract mood/language
-            moods = ["sad", "happy", "calm", "energetic", "chill", "romantic", "focus", "low", "melancholy"]
-            languages = ["telugu", "hindi", "kannada", "tamil", "english", "korean", "spanish", "punjabi"]
+            # Music search - extract mood/language
+            moods = ["sad", "happy", "calm", "energetic", "chill", "romantic", "focus", "melancholy", "upbeat", "relaxing"]
+            languages = ["telugu", "hindi", "kannada", "tamil", "english", "korean", "spanish", "punjabi", "japanese", "arabic"]
 
             found_mood = next((m for m in moods if m in text_lower), None)
             found_lang = next((l for l in languages if l in text_lower), None)
@@ -394,19 +462,27 @@ Be concise (2-3 sentences). Be helpful and friendly.
                 if found_lang:
                     query_parts.append(found_lang)
                 if found_mood:
-                    # Map "low" to "sad"
-                    query_parts.append("sad emotional" if found_mood == "low" else found_mood)
+                    query_parts.append(found_mood)
                 query_parts.append("songs music")
-                return f"Finding {' '.join(query_parts[:-1])} music!", {"action": "search", "query": " ".join(query_parts)}
+                return f"Playing {' '.join(query_parts[:-1])} music!", {"action": "search", "query": " ".join(query_parts)}
 
-            return "Finding music for you!", {"action": "search", "query": text}
+            # Generic play request
+            clean_query = text_lower
+            for word in play_words:
+                clean_query = clean_query.replace(word, "")
+            clean_query = clean_query.replace("some", "").replace("me", "").strip()
+            if clean_query:
+                return f"Finding '{clean_query}' for you!", {"action": "search", "query": clean_query}
+            return "What would you like me to play? Try: 'play sad Telugu songs' or 'play upbeat workout music'", {"action": "chat"}
 
         # Recommend/surprise
-        if any(word in text_lower for word in ["recommend", "suggest", "surprise"]):
-            return "Let me surprise you with something!", {"action": "search", "query": "popular trending music hits"}
+        if any(word in text_lower for word in ["recommend", "suggest", "surprise me"]):
+            return "Let me surprise you with something good!", {"action": "search", "query": "popular trending music hits"}
 
-        # Default - just chat
-        return "I can help you play music! Try 'play sad Telugu songs' or 'what song is this?'", {"action": "info"}
+        # ═══════════════════════════════════════════════════════════════════════
+        # DEFAULT: Just chat, don't assume music search
+        # ═══════════════════════════════════════════════════════════════════════
+        return "I'm here to help with music! You can say 'play some chill music', ask 'what song is this?', or just chat with me.", {"action": "chat"}
 
     def clear_history(self):
         """Clear conversation history."""

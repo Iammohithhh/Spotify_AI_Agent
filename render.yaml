@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: musicbuddy-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run_bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PLATFORM
+        value: youtube_music
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: musicbuddy-data
+      mountPath: /var/data
+      sizeGB: 1
